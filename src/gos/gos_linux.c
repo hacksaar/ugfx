@@ -124,6 +124,7 @@ gfxThreadHandle gfxThreadCreate(void *stackarea, size_t stacksz, threadpriority_
 
 	if (pthread_create(&th, 0, fn, param))
 		return 0;
+        pthread_detach(th);
 
 	return th;
 }
