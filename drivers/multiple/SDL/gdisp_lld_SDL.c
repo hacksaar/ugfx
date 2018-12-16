@@ -278,6 +278,11 @@ static int SDL_loop (void) {
 			case SDL_QUIT:
 				done = 1;
 				break;
+                        case SDL_WINDOWEVENT:
+                                if (event.window.event == SDL_WINDOWEVENT_CLOSE) {
+                                        done = 1;
+                                }
+                                break;
 			default:
 				break;
 			}
