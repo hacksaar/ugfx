@@ -19,6 +19,7 @@
 #include <signal.h>
 #include <semaphore.h>
 #include <SDL.h>
+#include <SDL_image.h>
 
 #define GDISP_DRIVER_VMT				GDISPVMT_SDL
 #include "gdisp_lld_config.h"
@@ -156,6 +157,9 @@
 #endif
 
 // shared IPC context
+
+#define NUM_LEDS  6
+
 struct SDL_UGFXContext {
 	uint32_t 	framebuf[GDISP_SCREEN_WIDTH*GDISP_SCREEN_HEIGHT];
 	int16_t		need_redraw;
@@ -168,8 +172,10 @@ struct SDL_UGFXContext {
 	uint16_t 	keypos;
 	struct 		SDL_keymsg keybuffer[8];
 #endif
+        uint8_t         leds[NUM_LEDS*4];
+        int16_t         need_led_update;
 };
- 
+
 static struct SDL_UGFXContext *context;
 static sem_t *ctx_mutex;
 static sem_t *input_event;
@@ -179,13 +185,75 @@ static sem_t *input_event;
 
 
 static int SDL_loop (void) {
+	int done = 0;
+
+        // GFX init
 	SDL_Window   *window = SDL_CreateWindow("uGFX", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, GDISP_SCREEN_WIDTH, GDISP_SCREEN_HEIGHT, 0);
 	SDL_Renderer *render = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
 	SDL_Texture  *texture = SDL_CreateTexture(render, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, GDISP_SCREEN_WIDTH, GDISP_SCREEN_HEIGHT);
-	int done = 0;
+
+        // LED init
+        SDL_Window *ledsWin;
+        SDL_Renderer *ledsRen;
+        SDL_Texture *ledsTexture;
+        SDL_Texture *ledMasks[NUM_LEDS];
+        {
+          // Load image and create window
+          IMG_Init(IMG_INIT_PNG);
+          SDL_Surface *ledsSurface = IMG_Load("leds.png");
+          if (!ledsSurface) {
+            perror("Failed to load LED image: leds.png");
+            exit(1);
+          }
+          ledsWin = SDL_CreateWindow("LEDs", 100, 200, ledsSurface->w, ledsSurface->h, SDL_WINDOW_SHOWN);
+          ledsRen = SDL_CreateRenderer(ledsWin, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+          ledsTexture = SDL_CreateTextureFromSurface(ledsRen, ledsSurface);
+          SDL_RenderCopy(ledsRen, ledsTexture, NULL, NULL);
+          SDL_RenderPresent(ledsRen);
+
+          // Create masks
+          SDL_Surface *ledMasksSurf[NUM_LEDS];
+          for (int i = 0; i < NUM_LEDS; ++i) {
+            ledMasksSurf[i] = SDL_CreateRGBSurfaceWithFormat(0, ledsSurface->w, ledsSurface->h, 16, SDL_PIXELFORMAT_RGBA4444);
+            uint32_t transparentPixel = SDL_MapRGBA(ledMasksSurf[i]->format, 0, 0, 0, 0);
+            SDL_FillRect(ledMasksSurf[i], &ledMasksSurf[i]->clip_rect, transparentPixel);
+            SDL_LockSurface(ledMasksSurf[i]);
+          }
+          SDL_LockSurface(ledsSurface);
+
+          // Initial masks
+          for (int x = 0; x < ledsSurface->w; ++x) {
+            for (int y = 0; y < ledsSurface->h; ++y) {
+              // Get pixel data
+              uint8_t *ledsPixel = (uint8_t*)ledsSurface->pixels + y*ledsSurface->pitch + x*ledsSurface->format->BytesPerPixel;
+              uint32_t curPixel = 0;
+              memcpy(&curPixel, ledsPixel, ledsSurface->format->BytesPerPixel);
+              // Get color values
+              uint8_t r, g, b;
+              SDL_GetRGB(curPixel, ledsSurface->format, &r, &g, &b);
+              if (g == 17 && b == 137 && r < NUM_LEDS) {
+                // It's a magic pixel!
+                SDL_Surface *mask = ledMasksSurf[r];
+                uint8_t *maskPixel = (uint8_t*)mask->pixels + y*mask->pitch + x*mask->format->BytesPerPixel;
+                curPixel = SDL_MapRGBA(mask->format, 255, 255, 255, 255);
+                memcpy(maskPixel, &curPixel, mask->format->BytesPerPixel);
+              }
+            }
+          }
+
+          // Unlock and cleanup
+          SDL_UnlockSurface(ledsSurface);
+          for (int i = 0; i < NUM_LEDS; ++i) {
+            SDL_UnlockSurface(ledMasksSurf[i]);
+            ledMasks[i] = SDL_CreateTextureFromSurface(ledsRen, ledMasksSurf[i]);
+            SDL_FreeSurface(ledMasksSurf[i]);
+          }
+          SDL_FreeSurface(ledsSurface);
+        }
 
 	while  (!done) {
 		
+                // GFX update
 		if (context->need_redraw) {
 			context->need_redraw = 0;
 			SDL_Rect r;
@@ -202,6 +270,26 @@ static int SDL_loop (void) {
 			SDL_RenderCopy(render, texture, 0, 0);
 			SDL_RenderPresent(render);
 		}
+                // LED update
+                if (context->need_led_update) {
+                  context->need_led_update = 0;
+                  // Render background
+                  SDL_RenderCopy(ledsRen, ledsTexture, NULL, NULL);
+
+                  // Render masks
+                  for (int i = 0; i < NUM_LEDS; ++i) {
+                    uint8_t g = context->leds[i*4+0];
+                    uint8_t r = context->leds[i*4+1];
+                    uint8_t b = context->leds[i*4+2];
+                    //uint8_t w = data[i*4+3];
+                    SDL_SetTextureColorMod(ledMasks[i], r, g, b);
+                    SDL_RenderCopy(ledsRen, ledMasks[i], NULL, NULL);
+                  }
+
+                  // Done
+                  SDL_RenderPresent(ledsRen);
+                }
+                // Event handling
 		SDL_Event event;
 		for (; SDL_PollEvent(&event); ){
 			switch(event.type){
@@ -370,6 +458,18 @@ void sdl_driver_init (void) {
 	// Continue execution of ugfx UI in forked process
 }
 
+// LED data input
+void gdisp_leds_send_data(uint8_t *data, uint64_t len) { // called in worker process
+  len /= 4; // adjust to number of LEDs
+  if (len > NUM_LEDS) {
+    len = NUM_LEDS;
+  }
+  memcpy(context->leds, data, len*4);
+  memset(context->leds + len*4, 0, (NUM_LEDS-len)*4);
+  context->need_led_update = 1;
+}
+
+// gdisp stuff
 
 LLDSPEC bool_t gdisp_lld_init(GDisplay *g) {
 	g->board = 0;					// No board interface for this driver
