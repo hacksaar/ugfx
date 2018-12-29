@@ -158,7 +158,10 @@
 
 // shared IPC context
 
-#define NUM_LEDS  6
+#define NUM_GRBW_LEDS  6
+#define NUM_GRB_LEDS   240
+#define NUM_LEDS       (NUM_GRBW_LEDS + NUM_GRB_LEDS)
+#define LED_DATA_LEN   (NUM_GRBW_LEDS*4 + NUM_GRB_LEDS*3)
 
 struct SDL_UGFXContext {
 	uint32_t 	framebuf[GDISP_SCREEN_WIDTH*GDISP_SCREEN_HEIGHT];
@@ -172,7 +175,7 @@ struct SDL_UGFXContext {
 	uint16_t 	keypos;
 	struct 		SDL_keymsg keybuffer[8];
 #endif
-        uint8_t         leds[NUM_LEDS*4];
+        uint8_t         leds[LED_DATA_LEN];
         int16_t         need_led_update;
 };
 
@@ -277,13 +280,39 @@ static int SDL_loop (void) {
                   SDL_RenderCopy(ledsRen, ledsTexture, NULL, NULL);
 
                   // Render masks
-                  for (int i = 0; i < NUM_LEDS; ++i) {
-                    uint8_t g = context->leds[i*4+0];
-                    uint8_t r = context->leds[i*4+1];
-                    uint8_t b = context->leds[i*4+2];
-                    //uint8_t w = data[i*4+3];
-                    SDL_SetTextureColorMod(ledMasks[i], r, g, b);
-                    SDL_RenderCopy(ledsRen, ledMasks[i], NULL, NULL);
+                  int led_idx = 0;
+                  int byte_idx = 0;
+                  // read the ones with white
+                  for (int i = 0; i < NUM_GRBW_LEDS; ++i) {
+                    uint32_t g = context->leds[byte_idx+0];
+                    uint32_t r = context->leds[byte_idx+1];
+                    uint32_t b = context->leds[byte_idx+2];
+                    //uint32_t w = context->leds[byte_idx+3];
+                    // ignore w, scale the rest by factor 5 because these LEDs are so crazy bright
+                    r *= 5; if (r >= 256) { r = 255; }
+                    g *= 5; if (g >= 256) { g = 255; }
+                    b *= 5; if (b >= 256) { b = 255; }
+                    // now render
+                    SDL_SetTextureColorMod(ledMasks[led_idx], r, g, b);
+                    SDL_RenderCopy(ledsRen, ledMasks[led_idx], NULL, NULL);
+                    // move on
+                    led_idx += 1;
+                    byte_idx += 4;
+                  }
+                  // then the ones without white
+                  for (int i = 0; i < NUM_GRB_LEDS; ++i) {
+                    uint8_t g = context->leds[byte_idx+0];
+                    uint8_t r = context->leds[byte_idx+1];
+                    uint8_t b = context->leds[byte_idx+2];
+                    // scale by factor 2 because these LEDs are so crazy bright
+                    r *= 2; if (r >= 256) { r = 255; }
+                    g *= 2; if (g >= 256) { g = 255; }
+                    b *= 2; if (b >= 256) { b = 255; }
+                    SDL_SetTextureColorMod(ledMasks[led_idx], r, g, b);
+                    SDL_RenderCopy(ledsRen, ledMasks[led_idx], NULL, NULL);
+                    // move on
+                    led_idx += 1;
+                    byte_idx += 3;
                   }
 
                   // Done
@@ -460,13 +489,14 @@ void sdl_driver_init (void) {
 
 // LED data input
 void gdisp_leds_send_data(uint8_t *data, uint64_t len) { // called in worker process
-  len /= 4; // adjust to number of LEDs
-  if (len > NUM_LEDS) {
-    len = NUM_LEDS;
+  if (len > LED_DATA_LEN) {
+    len = LED_DATA_LEN;
   }
-  memcpy(context->leds, data, len*4);
-  memset(context->leds + len*4, 0, (NUM_LEDS-len)*4);
+  memcpy(context->leds, data, len);
   context->need_led_update = 1;
+  // sleep a bit, copying this to the bus takes a bit
+  uint64_t bits = len*8;
+  usleep(bits);
 }
 
 // gdisp stuff
